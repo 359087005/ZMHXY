@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "修改代码前二次确认",
+  "description": "在执行任何代码写入操作之前，先向用户确认修改内容，获得同意后再执行。",
+  "version": "1",
+  "when": {
+    "type": "preToolUse",
+    "toolTypes": [
+      "write"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "你即将修改代码文件。请先向用户简要说明你要做什么改动，等用户确认后再执行写入操作。如果用户没有明确同意，不要继续执行。"
+  }
+}
