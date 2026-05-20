@@ -42,7 +42,7 @@ HUODONG_GOTO_OFFSET_X = 155
 TASK_CLICK_RANDOM_OFFSET = 5
 MAP_NAV_RANDOM_OFFSET = 0
 NEXT_ROUND_CONFIRM_CLICK = (473, 337)
-START_ZHUAGUI_CLICK = (698, 190)
+START_ZHUAGUI_CLICK = (698, 160)
 
 OVER_20_NAV_STEPS = [
     ((36, 38), "打开地图", 2.0),
@@ -58,6 +58,7 @@ HUODONG_TELEPORT_WAIT_SEC = 20.0
 START_ZHUAGUI_WAIT_SEC = 10.0
 BATTLE_POLL_WAIT_SEC = 30.0
 NEXT_ROUND_SEARCH_WAIT_SEC = 2.0
+NEXT_ROUND_TELEPORT_WAIT_SEC = 10.0
 NEXT_ROUND_MISS_LIMIT = 6
 
 
@@ -166,12 +167,25 @@ def _accept_zhuagui_task(bot, check_stop, stop_event):
 
 def _find_battle_cancel(bot, check_stop, stop_event):
     check_stop(stop_event)
+    # 调试：保存截图，确认截到的内容是否正确
+    try:
+        import cv2
+        from script_action import _capture_window_bgr
+        frame = _capture_window_bgr(bot.hwnd)
+        if frame is not None:
+            cv2.imwrite("debug_cancel_frame.png", frame)
+            bot.log("已保存截图到 debug_cancel_frame.png")
+        else:
+            bot.log("调试截图失败：frame 为 None")
+    except Exception as e:
+        bot.log(f"调试截图异常: {e}")
     return bot.find_image(
         BATTLE_CANCEL_TEMPLATE,
         threshold=MATCH_THRESHOLD,
         search_rect=CANCEL_BUTTON_RECT,
-        log_miss=False,
+        log_miss=True,
     )
+
 
 
 def _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event) -> bool:
@@ -200,7 +214,7 @@ def _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event) -> bool:
                 0,
             )
             bot.log("开始下一轮..")
-            wait_or_stop(bot, stop_event, DEFAULT_WAIT_SEC)
+            wait_or_stop(bot, stop_event, NEXT_ROUND_TELEPORT_WAIT_SEC)
             return True
 
         cancel_match = _find_battle_cancel(bot, check_stop, stop_event)
