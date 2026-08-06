@@ -731,6 +731,7 @@ class WindowCaptureApp:
             ("da_bao_tu", "打宝图", False),
             ("mi_jing_xiang_yao", "秘境降妖", False),
             ("zhua_gui", "抓鬼任务", False),
+            ("fu_ben", "副本", False),
             ("yun_biao", "运镖", False),
             ("san_jie_qi_yuan", "三界奇缘", False),
             ("ke_ju_xiang_shi", "科举乡试", False),

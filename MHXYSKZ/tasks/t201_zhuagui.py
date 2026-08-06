@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Callable, Iterable
 
 from tasks.shared_rects import CANCEL_BUTTON_RECT, HUODONG_SEARCH_RECT
@@ -59,7 +60,10 @@ START_ZHUAGUI_WAIT_SEC = 10.0
 BATTLE_POLL_WAIT_SEC = 30.0
 NEXT_ROUND_SEARCH_WAIT_SEC = 2.0
 NEXT_ROUND_TELEPORT_WAIT_SEC = 10.0
-NEXT_ROUND_MISS_LIMIT = 6
+# 脱离战斗后允许的最长空转时间：超过这个时长仍没等到「继续抓鬼」，才判定异常退出。
+NEXT_ROUND_IDLE_TIMEOUT_SEC = 180.0
+# 空转期间只保留前几次的现场截图，避免 180 秒内刷出几十张图。
+NEXT_ROUND_DEBUG_DUMP_LIMIT = 3
 
 
 class TaskAbort(Exception):
@@ -167,35 +171,73 @@ def _accept_zhuagui_task(bot, check_stop, stop_event):
 
 def _find_battle_cancel(bot, check_stop, stop_event):
     check_stop(stop_event)
-    # 调试：保存截图，确认截到的内容是否正确
-    try:
-        import cv2
-        from script_action import _capture_window_bgr
-        frame = _capture_window_bgr(bot.hwnd)
-        if frame is not None:
-            cv2.imwrite("debug_cancel_frame.png", frame)
-            bot.log("已保存截图到 debug_cancel_frame.png")
-        else:
-            bot.log("调试截图失败：frame 为 None")
-    except Exception as e:
-        bot.log(f"调试截图异常: {e}")
     return bot.find_image(
         BATTLE_CANCEL_TEMPLATE,
         threshold=MATCH_THRESHOLD,
         search_rect=CANCEL_BUTTON_RECT,
-        log_miss=True,
+        log_miss=False,
     )
 
+
+def _debug_dump_next_round_miss(bot, miss_count: int) -> None:
+    """未识别到继续抓鬼时落盘现场信息，用于区分弹窗没出现 / 位置偏出搜索区 / 分数不够。"""
+    if miss_count > NEXT_ROUND_DEBUG_DUMP_LIMIT:
+        return
+    try:
+        import cv2
+        from script_action import (
+            _capture_window_bgr,
+            _crop_frame_to_search_rect,
+            _load_template_image,
+            _match_template,
+            _prepare_match_frame,
+        )
+
+        frame = _capture_window_bgr(bot.hwnd)
+        if frame is None:
+            bot.log("调试[jxzg]：抓帧失败，未拿到窗口图像（PrintWindow 可能返回空帧）。")
+            return
+
+        height, width = frame.shape[:2]
+        template, _path = _load_template_image(NEXT_ROUND_TEMPLATE, True)
+        t_h, t_w = template.shape[:2]
+        bot.log(f"调试[jxzg]：客户区抓帧 {width}x{height}，模板 {t_w}x{t_h}。")
+
+        full = _match_template(_prepare_match_frame(frame, True), template, -1.0)
+        if full:
+            cx, cy, score, left, top, _tw, _th = full
+            bot.log(
+                f"调试[jxzg]：全客户区最高分 score={score:.4f} "
+                f"center=({cx},{cy}) 左上=({left},{top}) 搜索区={NEXT_ROUND_SEARCH_RECT}"
+            )
+
+        crop, _ox, _oy, normalized = _crop_frame_to_search_rect(frame, NEXT_ROUND_SEARCH_RECT)
+        if crop is not None:
+            region = _match_template(_prepare_match_frame(crop, True), template, -1.0)
+            if region:
+                bot.log(
+                    f"调试[jxzg]：搜索区{normalized}内最高分 score={region[2]:.4f}"
+                    f"（阈值 {MATCH_THRESHOLD}）"
+                )
+            cv2.imwrite(f"debug_jxzg_miss_{miss_count}_region.png", crop)
+        cv2.imwrite(f"debug_jxzg_miss_{miss_count}_full.png", frame)
+        bot.log(
+            f"调试[jxzg]：已保存 debug_jxzg_miss_{miss_count}_full.png / _region.png"
+        )
+    except Exception as exc:
+        bot.log(f"调试[jxzg]：保存现场信息失败: {exc}")
 
 
 def _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event) -> bool:
     miss_count = 0
+    idle_since = time.monotonic()
 
     while True:
         cancel_match = _find_battle_cancel(bot, check_stop, stop_event)
         if cancel_match:
             bot.log("检测到战斗中的取消按钮，等待 30 秒后继续轮询。")
             miss_count = 0
+            idle_since = time.monotonic()
             wait_or_stop(bot, stop_event, BATTLE_POLL_WAIT_SEC)
             continue
 
@@ -221,13 +263,21 @@ def _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event) -> bool:
         if cancel_match:
             bot.log("未找到 jm_jxzg.png，但重新检测到战斗中的取消按钮，等待 30 秒后继续轮询。")
             miss_count = 0
+            idle_since = time.monotonic()
             wait_or_stop(bot, stop_event, BATTLE_POLL_WAIT_SEC)
             continue
 
         miss_count += 1
-        bot.log(f"未找到 jm_jxzg.png，且未检测到战斗中的取消按钮，第 {miss_count} 次。")
-        if miss_count > NEXT_ROUND_MISS_LIMIT:
-            bot.log("连续超过 6 次未找到 jm_jxzg，且未检测到战斗中的取消按钮，按规则判定超过 3 分钟不在战斗，退出抓鬼逻辑。")
+        idle_sec = time.monotonic() - idle_since
+        bot.log(
+            f"未找到 jm_jxzg.png，且未检测到战斗中的取消按钮，"
+            f"第 {miss_count} 次，已空转 {idle_sec:.0f}/{NEXT_ROUND_IDLE_TIMEOUT_SEC:.0f} 秒。"
+        )
+        _debug_dump_next_round_miss(bot, miss_count)
+        if idle_sec >= NEXT_ROUND_IDLE_TIMEOUT_SEC:
+            bot.log(
+                f"已连续 {idle_sec:.0f} 秒既不在战斗、也没等到继续抓鬼提示，退出抓鬼逻辑。"
+            )
             return False
 
 
