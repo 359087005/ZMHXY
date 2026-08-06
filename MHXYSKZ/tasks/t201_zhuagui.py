@@ -7,6 +7,7 @@
 - 201ZhuaGui/jm_zg2.png
 - 201ZhuaGui/jm_zg.png
 - 201ZhuaGui/jm_zgrw.png
+- 201ZhuaGui/jm_jxzg_ts.png（jm_jxzg.png 去掉底部倒计时按钮后的版本）
 - 201ZhuaGui/jm_jxzg.png
 
 复用模板：
@@ -33,7 +34,13 @@ ZHUAGUI_HUODONG_TEMPLATES = (
     "201ZhuaGui/jm_zg.png",
 )
 ZHUAGUI_TASK_TEMPLATE = "201ZhuaGui/jm_zgrw.png"
-NEXT_ROUND_TEMPLATE = "201ZhuaGui/jm_jxzg.png"
+# jm_jxzg.png 原图把底部「确定300 / 取消」按钮一起截进去了，
+# 倒计时每秒变化、且 300->99 位数减少时排版会整体挪动，导致匹配分数忽高忽低。
+# jm_jxzg_ts.png 只保留上方固定的提示文字区，优先用它；原图留作兜底。
+NEXT_ROUND_TEMPLATES = (
+    "201ZhuaGui/jm_jxzg_ts.png",
+    "201ZhuaGui/jm_jxzg.png",
+)
 BATTLE_CANCEL_TEMPLATE = "201ZhuaGui/quxiao.png"
 
 ZHUAGUI_TASK_SEARCH_RECT = (562, 126, 770, 448)
@@ -199,26 +206,35 @@ def _debug_dump_next_round_miss(bot, miss_count: int) -> None:
             return
 
         height, width = frame.shape[:2]
-        template, _path = _load_template_image(NEXT_ROUND_TEMPLATE, True)
-        t_h, t_w = template.shape[:2]
-        bot.log(f"调试[jxzg]：客户区抓帧 {width}x{height}，模板 {t_w}x{t_h}。")
+        bot.log(f"调试[jxzg]：客户区抓帧 {width}x{height}。")
 
-        full = _match_template(_prepare_match_frame(frame, True), template, -1.0)
-        if full:
-            cx, cy, score, left, top, _tw, _th = full
+        gray_full = _prepare_match_frame(frame, True)
+        crop, _ox, _oy, normalized = _crop_frame_to_search_rect(frame, NEXT_ROUND_SEARCH_RECT)
+        gray_crop = _prepare_match_frame(crop, True) if crop is not None else None
+
+        for name in NEXT_ROUND_TEMPLATES:
+            template, path = _load_template_image(name, True)
+            t_h, t_w = template.shape[:2]
+            full = _match_template(gray_full, template, -1.0)
+            full_text = (
+                f"全图最高分={full[2]:.4f} 命中中心=({full[0]},{full[1]})"
+                if full
+                else "全图无法匹配"
+            )
+            region_text = ""
+            if gray_crop is not None:
+                region = _match_template(gray_crop, template, -1.0)
+                region_text = (
+                    f" 搜索区{normalized}最高分={region[2]:.4f}"
+                    if region
+                    else f" 搜索区{normalized}无法匹配"
+                )
             bot.log(
-                f"调试[jxzg]：全客户区最高分 score={score:.4f} "
-                f"center=({cx},{cy}) 左上=({left},{top}) 搜索区={NEXT_ROUND_SEARCH_RECT}"
+                f"调试[jxzg]：{path.name}({t_w}x{t_h}) {full_text}{region_text}"
+                f" 阈值={MATCH_THRESHOLD}"
             )
 
-        crop, _ox, _oy, normalized = _crop_frame_to_search_rect(frame, NEXT_ROUND_SEARCH_RECT)
         if crop is not None:
-            region = _match_template(_prepare_match_frame(crop, True), template, -1.0)
-            if region:
-                bot.log(
-                    f"调试[jxzg]：搜索区{normalized}内最高分 score={region[2]:.4f}"
-                    f"（阈值 {MATCH_THRESHOLD}）"
-                )
             cv2.imwrite(f"debug_jxzg_miss_{miss_count}_region.png", crop)
         cv2.imwrite(f"debug_jxzg_miss_{miss_count}_full.png", frame)
         bot.log(
@@ -242,11 +258,13 @@ def _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event) -> bool:
             continue
 
         wait_or_stop(bot, stop_event, NEXT_ROUND_SEARCH_WAIT_SEC)
-        next_round_match = bot.find_image(
-            NEXT_ROUND_TEMPLATE,
-            threshold=MATCH_THRESHOLD,
-            search_rect=NEXT_ROUND_SEARCH_RECT,
-            log_miss=False,
+        next_round_match, _next_round_template = _find_first_match(
+            bot,
+            check_stop,
+            stop_event,
+            NEXT_ROUND_TEMPLATES,
+            NEXT_ROUND_SEARCH_RECT,
+            label="继续抓鬼提示",
         )
         if next_round_match:
             bot.log("识别到继续抓鬼提示，点击开始下一轮。")
