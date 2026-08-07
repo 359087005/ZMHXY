@@ -60,6 +60,9 @@ OVER_20_NAV_STEPS = [
 ]
 
 MATCH_THRESHOLD = 0.85
+# 战斗结束的弹窗/取消按钮可能是独立子窗口，PW_CLIENTONLY 抓不到这一层，
+# 这里统一用 PW_RENDERFULLCONTENT 走 DWM 完整合成。
+NEXT_ROUND_FULL_CONTENT = True
 DEFAULT_WAIT_SEC = 3.0
 OPEN_HUODONG_WAIT_SEC = 2.0
 HUODONG_TELEPORT_WAIT_SEC = 20.0
@@ -85,6 +88,7 @@ def _find_first_match(
     search_rect: tuple[int, int, int, int],
     *,
     label: str,
+    full_content: bool = False,
 ) -> tuple[MatchResult | None, str | None]:
     for template in templates:
         check_stop(stop_event)
@@ -93,6 +97,7 @@ def _find_first_match(
             threshold=MATCH_THRESHOLD,
             search_rect=search_rect,
             log_miss=False,
+            full_content=full_content,
         )
         if match:
             x, y, score = match
@@ -183,15 +188,33 @@ def _find_battle_cancel(bot, check_stop, stop_event):
         threshold=MATCH_THRESHOLD,
         search_rect=CANCEL_BUTTON_RECT,
         log_miss=False,
+        full_content=NEXT_ROUND_FULL_CONTENT,
     )
 
 
+def _save_png(path: str, image) -> None:
+    """用 imencode+tofile 落盘：cv2.imwrite 遇到非 ASCII 路径会静默失败。"""
+    import cv2
+    import numpy as np
+
+    ok, buf = cv2.imencode(".png", image)
+    if not ok:
+        raise RuntimeError(f"imencode 失败: {path}")
+    np.asarray(buf).tofile(path)
+
+
 def _debug_dump_next_round_miss(bot, miss_count: int) -> None:
-    """未识别到继续抓鬼时落盘现场信息，用于区分弹窗没出现 / 位置偏出搜索区 / 分数不够。"""
+    """未识别到继续抓鬼时落盘现场信息。
+
+    同时用两种 PrintWindow 方式各抓一帧并打印 md5：
+    - md5 每次不变 -> 抓到的是 DWM 缓存旧帧
+    - 两种方式 md5 不同 -> PW_CLIENTONLY 漏掉了弹窗所在的子窗口层
+    """
     if miss_count > NEXT_ROUND_DEBUG_DUMP_LIMIT:
         return
     try:
-        import cv2
+        import hashlib
+
         from script_action import (
             _capture_window_bgr,
             _crop_frame_to_search_rect,
@@ -200,48 +223,56 @@ def _debug_dump_next_round_miss(bot, miss_count: int) -> None:
             _prepare_match_frame,
         )
 
-        frame = _capture_window_bgr(bot.hwnd)
-        if frame is None:
-            bot.log("调试[jxzg]：抓帧失败，未拿到窗口图像（PrintWindow 可能返回空帧）。")
-            return
+        frames: dict[str, object] = {}
+        for label, full_content in (("clientonly", False), ("fullcontent", True)):
+            frame = _capture_window_bgr(bot.hwnd, full_content=full_content)
+            if frame is None:
+                bot.log(f"调试[jxzg]：{label} 抓帧失败（PrintWindow 返回空帧）。")
+                continue
+            frames[label] = frame
+            height, width = frame.shape[:2]
+            digest = hashlib.md5(frame.tobytes()).hexdigest()[:12]
+            bot.log(f"调试[jxzg]：{label} 抓帧 {width}x{height} md5={digest}")
 
-        height, width = frame.shape[:2]
-        bot.log(f"调试[jxzg]：客户区抓帧 {width}x{height}。")
-
-        gray_full = _prepare_match_frame(frame, True)
-        crop, _ox, _oy, normalized = _crop_frame_to_search_rect(frame, NEXT_ROUND_SEARCH_RECT)
-        gray_crop = _prepare_match_frame(crop, True) if crop is not None else None
-
-        for name in NEXT_ROUND_TEMPLATES:
-            template, path = _load_template_image(name, True)
-            t_h, t_w = template.shape[:2]
-            full = _match_template(gray_full, template, -1.0)
-            full_text = (
-                f"全图最高分={full[2]:.4f} 命中中心=({full[0]},{full[1]})"
-                if full
-                else "全图无法匹配"
+        for label, frame in frames.items():
+            gray_full = _prepare_match_frame(frame, True)
+            crop, _ox, _oy, normalized = _crop_frame_to_search_rect(
+                frame, NEXT_ROUND_SEARCH_RECT
             )
-            region_text = ""
-            if gray_crop is not None:
-                region = _match_template(gray_crop, template, -1.0)
-                region_text = (
-                    f" 搜索区{normalized}最高分={region[2]:.4f}"
-                    if region
-                    else f" 搜索区{normalized}无法匹配"
+            gray_crop = _prepare_match_frame(crop, True) if crop is not None else None
+
+            for name in NEXT_ROUND_TEMPLATES:
+                template, path = _load_template_image(name, True)
+                t_h, t_w = template.shape[:2]
+                full = _match_template(gray_full, template, -1.0)
+                full_text = (
+                    f"全图={full[2]:.4f}@({full[0]},{full[1]})"
+                    if full
+                    else "全图无法匹配"
                 )
-            bot.log(
-                f"调试[jxzg]：{path.name}({t_w}x{t_h}) {full_text}{region_text}"
-                f" 阈值={MATCH_THRESHOLD}"
-            )
+                region_text = ""
+                if gray_crop is not None:
+                    region = _match_template(gray_crop, template, -1.0)
+                    region_text = (
+                        f" 搜索区{normalized}={region[2]:.4f}"
+                        if region
+                        else f" 搜索区{normalized}无法匹配"
+                    )
+                bot.log(
+                    f"调试[jxzg]：{label} {path.name}({t_w}x{t_h}) "
+                    f"{full_text}{region_text} 阈值={MATCH_THRESHOLD}"
+                )
 
-        if crop is not None:
-            cv2.imwrite(f"debug_jxzg_miss_{miss_count}_region.png", crop)
-        cv2.imwrite(f"debug_jxzg_miss_{miss_count}_full.png", frame)
-        bot.log(
-            f"调试[jxzg]：已保存 debug_jxzg_miss_{miss_count}_full.png / _region.png"
-        )
+            if crop is not None:
+                _save_png(f"debug_jxzg_{miss_count}_{label}_region.png", crop)
+            _save_png(f"debug_jxzg_{miss_count}_{label}_full.png", frame)
+
+        if frames:
+            bot.log(
+                f"调试[jxzg]：已保存 debug_jxzg_{miss_count}_*_full.png / _region.png"
+            )
     except Exception as exc:
-        bot.log(f"调试[jxzg]：保存现场信息失败: {exc}")
+        bot.log(f"调试[jxzg]：保存现场信息失败: {exc!r}")
 
 
 def _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event) -> bool:
@@ -265,6 +296,7 @@ def _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event) -> bool:
             NEXT_ROUND_TEMPLATES,
             NEXT_ROUND_SEARCH_RECT,
             label="继续抓鬼提示",
+            full_content=NEXT_ROUND_FULL_CONTENT,
         )
         if next_round_match:
             bot.log("识别到继续抓鬼提示，点击开始下一轮。")
