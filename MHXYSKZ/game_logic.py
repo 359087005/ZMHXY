@@ -22,6 +22,7 @@ TASK_LABELS = {
     "da_bao_tu": "打宝图",
     "mi_jing_xiang_yao": "秘境降妖",
     "zhua_gui": "抓鬼任务",
+    "ji_xu_zhua_gui": "继续抓鬼",
     "fu_ben": "副本",
     "yun_biao": "运镖",
     "san_jie_qi_yuan": "三界奇缘",
@@ -37,6 +38,7 @@ DIRECT_RUN_TASK_MODULES = {
     "wa_bao_tu": "tasks.t199_wabaotu",
     "mi_jing_xiang_yao": "tasks.t107_mijingxiangyao",
     "zhua_gui": "tasks.t201_zhuagui",
+    "ji_xu_zhua_gui": "tasks.t203_jixuzhuagui",
     "fu_ben": "tasks.t202_fuben",
 }
 

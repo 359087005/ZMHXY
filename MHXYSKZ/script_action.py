@@ -706,14 +706,10 @@ def _resolve_template_path(name: str | Path) -> Path:
 
 
 # 抓取窗口画面并转换为 BGR 图像。
-# full_content=True 时优先用 PW_RENDERFULLCONTENT：
-# PW_CLIENTONLY 只渲染窗口自身客户区，游戏的模态弹窗若是独立子窗口/分层窗口会被整层漏掉，
-# 表现为画面正常但弹窗不见，且容易拿到 DWM 缓存的旧帧。
-def _capture_window_bgr(
-    hwnd: int,
-    client_only: bool = True,
-    full_content: bool = False,
-):
+# 注意 client_only=True 时必须优先 PW_CLIENTONLY：
+# PW_RENDERFULLCONTENT 渲染的是整个窗口，再按客户区尺寸裁剪会整体偏移
+# （实测 dx=+8 dy=+31，即边框与标题栏厚度），导致所有模板坐标系错位。
+def _capture_window_bgr(hwnd: int, client_only: bool = True):
     _ensure_cv2_available()
     if not user32.IsWindow(hwnd):
         return None
@@ -722,10 +718,7 @@ def _capture_window_bgr(
         rect = _get_client_rect(hwnd)
         width = rect.right
         height = rect.bottom
-        if full_content:
-            pw_flags_candidates = [PW_RENDERFULLCONTENT, PW_CLIENTONLY, 0]
-        else:
-            pw_flags_candidates = [PW_CLIENTONLY, PW_RENDERFULLCONTENT, 0]
+        pw_flags_candidates = [PW_CLIENTONLY, PW_RENDERFULLCONTENT, 0]
         fallback_dc_getter = user32.GetDC
     else:
         rect = _get_window_rect(hwnd)
@@ -1024,14 +1017,9 @@ class WindowAutomation:
         client_only: bool = True,
         search_rect: SearchRect | None = None,
         log_miss: bool = True,
-        full_content: bool = False,
     ) -> tuple[int, int, float] | None:
         template, path = _load_template_image(name, grayscale)
-        frame = _capture_window_bgr(
-            self.hwnd,
-            client_only=client_only,
-            full_content=full_content,
-        )
+        frame = _capture_window_bgr(self.hwnd, client_only=client_only)
         if frame is None:
             if log_miss:
                 self.log("模板识别抓帧失败：当前未拿到可用窗口图像。")
