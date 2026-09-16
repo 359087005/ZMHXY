@@ -2772,9 +2772,11 @@ class WindowCaptureApp:
                 pass
 
         def _worker():
+            logic_module_path = "<尚未加载>"
             try:
                 module = importlib.import_module("game_logic")
                 module = importlib.reload(module)
+                logic_module_path = str(getattr(module, "__file__", "<未知路径>"))
 
                 def log(msg: str):
                     _ui_call(self._append_log, msg)
@@ -2786,8 +2788,16 @@ class WindowCaptureApp:
                     task_flags=task_flags,
                     task_options=task_options,
                 )
-            except Exception as e:
-                _ui_call(self._append_log, f"[错误] {e}")
+            except Exception:
+                import traceback
+
+                error_details = traceback.format_exc().rstrip()
+                selected_tasks = " / ".join(selected_labels)
+                _ui_call(
+                    self._append_log,
+                    f"[错误] 已选任务: {selected_tasks}\n"
+                    f"逻辑模块: {logic_module_path}\n{error_details}",
+                )
             finally:
                 def _finalize():
                     self.script_stop_event = None
