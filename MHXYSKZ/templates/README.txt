@@ -15,13 +15,13 @@
 
     bot.find_image("start_button", search_rect=(402, 159, 717, 469))
 
-当前 game_logic.py 的挖宝图流程默认会用到这些模板名：
+当前挖宝图流程默认会用到这些模板（102BaoTuRenWu/）：
 
     bb_baotu.png
     jm_shiyong.png
     quxiao.png
 
-当前秘境降妖流程默认会用到这些模板名：
+当前秘境降妖流程默认会用到这些模板（107MiJingXiangyao/）：
 
     jm_mjxy.png
     jm_mjxy_tj.png
@@ -29,9 +29,10 @@
     mjxy_jr.png
     mjxy_jxtz.png
 
-当前抓鬼流程默认会用到这些模板名：
+另外复用 201ZhuaGui/quxiao.png 判断是否在战斗中。
 
-    jm_zg2.png
-    jm_zg.png
+当前抓鬼流程默认会用到这些模板（201ZhuaGui/）：
+
     jm_zgrw.png
-    jm_jxzg.png
+    jm_jxzg_qd.png
+    quxiao.png

@@ -16,6 +16,7 @@ import struct
 import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 import zlib
 from tkinter import messagebox, ttk
@@ -28,6 +29,10 @@ PREVIEW_CLICK_MARKER_VISIBLE_MS = 5000
 PREVIEW_VIRTUAL_CLICK_FLASH_MS = 900
 LOG_TEXT_MAX_LINES = 2000
 LOG_TEXT_TRIM_TO_LINES = 1500
+# 脚本模板与坐标均按 800x600 客户区采集；执行脚本前会自动调整到该尺寸。
+SCRIPT_CLIENT_SIZE = (800, 600)
+# 自动调整分辨率后，先等目标窗口完成重绘，再开始识图和点击。
+SCRIPT_RESOLUTION_SETTLE_SEC = 2.0
 
 # ─── DPI Awareness（必须在创建任何窗口之前调用）─────────────────────────────
 
@@ -727,8 +732,7 @@ class WindowCaptureApp:
         self.script_stop_event: threading.Event | None = None
         self.logic_task_specs = [
             ("shi_men", "师门任务", False),
-            ("wa_bao_tu", "挖宝图", True),
-            ("da_bao_tu", "打宝图", False),
+            ("bao_tu", "宝图", True),
             ("mi_jing_xiang_yao", "秘境降妖", False),
             ("zhua_gui", "抓鬼任务", False),
             ("ji_xu_zhua_gui", "继续抓鬼", False),
@@ -743,13 +747,14 @@ class WindowCaptureApp:
             for key, _label, default in self.logic_task_specs
         }
         self.logic_option_specs = [
-            ("zhua_gui_over_20", "超20抓鬼", False),
+            ("zhua_gui_custom_rounds_enabled", "自定义抓几轮鬼", False),
         ]
         self.logic_option_vars = {
             key: tk.BooleanVar(value=default)
             for key, _label, default in self.logic_option_specs
         }
-        self.zhua_gui_rounds_var = tk.StringVar(value="0")
+        self.zhua_gui_rounds_var = tk.StringVar(value="1")
+        self.zhua_gui_rounds_entry: ttk.Entry | None = None
         self.logic_task_checkbuttons: list[ttk.Checkbutton] = []
         self.logic_option_checkbuttons: list[ttk.Checkbutton] = []
         self.window_resolution_width_var = tk.StringVar(value="800")
@@ -992,7 +997,7 @@ class WindowCaptureApp:
         ).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(
             resolution_frame,
-            text="← 调整当前锚定窗口的客户区尺寸，默认 800x600",
+            text="← 手动调整客户区尺寸（如截模板图），不影响执行脚本时自动设置的 800x600",
             font=("Microsoft YaHei UI", 8),
         ).pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1031,19 +1036,23 @@ class WindowCaptureApp:
                 text=label,
                 variable=self.logic_option_vars[key],
             )
+            if key == "zhua_gui_custom_rounds_enabled":
+                check.configure(command=self._sync_zhua_gui_rounds_entry_state)
             check.pack(side=tk.LEFT, padx=(8, 0))
             self.logic_option_checkbuttons.append(check)
-        ttk.Label(logic_frame, text="抓鬼轮数").pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Entry(
+        ttk.Label(logic_frame, text="轮数").pack(side=tk.LEFT, padx=(8, 0))
+        self.zhua_gui_rounds_entry = ttk.Entry(
             logic_frame,
             textvariable=self.zhua_gui_rounds_var,
             width=4,
-        ).pack(side=tk.LEFT, padx=(4, 0))
+        )
+        self.zhua_gui_rounds_entry.pack(side=tk.LEFT, padx=(4, 0))
         ttk.Label(
             logic_frame,
-            text="(0=不限)",
+            text="(未勾选=不限)",
             font=("Microsoft YaHei UI", 8),
         ).pack(side=tk.LEFT, padx=(2, 0))
+        self._sync_zhua_gui_rounds_entry_state()
 
         # Debug 放大镜
         debug_frame = ttk.Frame(self.root)
@@ -1752,6 +1761,134 @@ class WindowCaptureApp:
             self._refresh_sample_preview_now()
         else:
             self._restart_dwm_preview_mode(immediate=True)
+
+    def _ensure_script_window_resolution(self, hwnd: int) -> tuple[bool, bool]:
+        """执行脚本前，把目标窗口客户区调整为脚本所需的 800x600。
+
+        返回 (尺寸是否满足要求, 本次是否实际调整过窗口)。
+        已是目标尺寸时不触碰窗口；窗口处于后台保活位置或已最小化时，
+        调整后重新停靠到保活位置，避免尺寸变化让窗口完全移出屏幕而停止渲染。
+        """
+        target_client_width, target_client_height = SCRIPT_CLIENT_SIZE
+        is_iconic = bool(user32.IsIconic(hwnd))
+        before_client = _get_client_rect(hwnd)
+        before_client_width = before_client.right - before_client.left
+        before_client_height = before_client.bottom - before_client.top
+        if (
+            not is_iconic
+            and before_client_width == target_client_width
+            and before_client_height == target_client_height
+        ):
+            self._append_log(
+                f"目标窗口客户区已是 {target_client_width}x{target_client_height}，无需调整分辨率。"
+            )
+            return True, False
+
+        pid = _get_pid(hwnd)
+        self_admin = _is_self_admin()
+        target_admin = _is_process_elevated(pid)
+        self._append_log(
+            f"设置分辨率诊断: self_admin={'是' if self_admin else '否'} "
+            f"target_admin={'是' if target_admin else '否' if target_admin is not None else '未知'} "
+            f"pid={pid}"
+        )
+        if target_admin and not self_admin:
+            self._append_log("⚠ 当前程序不是管理员，而目标进程是管理员。尺寸调整可能被 UIPI 拒绝。")
+
+        placement = self._get_window_placement(hwnd)
+        saved_group = self.saved_window_groups.setdefault(pid, {})
+        if placement and hwnd not in saved_group:
+            saved_group[hwnd] = self._clone_placement(placement)
+
+        before_window = _get_window_rect(hwnd)
+        target_window_width, target_window_height = _get_window_outer_size_for_client(
+            hwnd,
+            target_client_width,
+            target_client_height,
+        )
+
+        keep_parked = is_iconic or _is_keepalive_parked(before_window)
+        if keep_parked:
+            # 保活位置按窗口高度计算，尺寸变化后必须重新计算，才能继续保留可见角。
+            parked_rect = _calc_keepalive_rect(target_window_width, target_window_height)
+            target_left = parked_rect.left
+            target_top = parked_rect.top
+        else:
+            target_left = before_window.left
+            target_top = before_window.top
+            if placement:
+                normal = placement.rcNormalPosition
+                if normal.right > normal.left and normal.bottom > normal.top:
+                    target_left = normal.left
+                    target_top = normal.top
+
+        # 只有最小化或最大化时才需要 SW_RESTORE，避免普通窗口被无谓地激活。
+        show_res: int | str = "skip"
+        show_err = 0
+        if is_iconic or user32.IsZoomed(hwnd):
+            kernel32.SetLastError(0)
+            show_res = user32.ShowWindow(hwnd, SW_RESTORE)
+            show_err = kernel32.GetLastError()
+
+        kernel32.SetLastError(0)
+        pos_res = user32.SetWindowPos(
+            hwnd,
+            0,
+            target_left,
+            target_top,
+            target_window_width,
+            target_window_height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        pos_err = kernel32.GetLastError()
+
+        after_window = _get_window_rect(hwnd)
+        after_client = _get_client_rect(hwnd)
+        after_window_width = after_window.right - after_window.left
+        after_window_height = after_window.bottom - after_window.top
+        after_client_width = after_client.right - after_client.left
+        after_client_height = after_client.bottom - after_client.top
+
+        parked_after = _is_keepalive_parked(after_window)
+        self._append_log(
+            f"设置分辨率 hwnd={hwnd:#010x} "
+            f"request_client={target_client_width}x{target_client_height} "
+            f"target_window={target_window_width}x{target_window_height} "
+            f"before_client={before_client_width}x{before_client_height} "
+            f"after_client={after_client_width}x{after_client_height} "
+            f"after_window={after_window_width}x{after_window_height} "
+            f"iconic={'是' if is_iconic else '否'} "
+            f"keep_parked={'是' if keep_parked else '否'} "
+            f"parked_after={'是' if parked_after else '否'} "
+            f"show={show_res}/err={show_err} setpos={pos_res}/err={pos_err}"
+        )
+        if show_err:
+            self._append_log(f"  ShowWindow error: {_format_win32_error(show_err)}")
+        if pos_err:
+            self._append_log(f"  SetWindowPos error: {_format_win32_error(pos_err)}")
+
+        client_matched = (
+            abs(after_client_width - target_client_width) <= 2
+            and abs(after_client_height - target_client_height) <= 2
+        )
+        if client_matched:
+            parked_text = "，并保持后台保活停靠" if keep_parked and parked_after else ""
+            self._append_log(
+                f"已将目标窗口客户区调整为 {after_client_width}x{after_client_height}{parked_text}。"
+            )
+            if keep_parked and not parked_after:
+                self._append_log("⚠ 调整尺寸后窗口未回到后台保活位置，可手动点击“转后台保活”。")
+        else:
+            self._append_log(
+                f"分辨率调整失败：要求 {target_client_width}x{target_client_height}，"
+                f"实际客户区 {after_client_width}x{after_client_height}。"
+            )
+
+        if self.sample_preview_enabled:
+            self._refresh_sample_preview_now()
+        else:
+            self._restart_dwm_preview_mode(immediate=True)
+        return client_matched, True
 
     def _move_selected_offscreen(self):
         if not self.selected_hwnd:
@@ -2664,6 +2801,18 @@ class WindowCaptureApp:
             return None
         return self.selected_hwnd
 
+    def _sync_zhua_gui_rounds_entry_state(self):
+        entry = self.zhua_gui_rounds_entry
+        if entry is None:
+            return
+        custom_rounds_enabled = bool(
+            self.logic_option_vars["zhua_gui_custom_rounds_enabled"].get()
+        )
+        if custom_rounds_enabled and self.script_stop_event is None:
+            entry.state(["!disabled"])
+        else:
+            entry.state(["disabled"])
+
     def _set_script_running_state(self, running: bool):
         if running:
             self.run_script_btn.state(["disabled"])
@@ -2672,6 +2821,8 @@ class WindowCaptureApp:
                 check.state(["disabled"])
             for check in self.logic_option_checkbuttons:
                 check.state(["disabled"])
+            if self.zhua_gui_rounds_entry is not None:
+                self.zhua_gui_rounds_entry.state(["disabled"])
             return
 
         self.run_script_btn.state(["!disabled"])
@@ -2680,6 +2831,7 @@ class WindowCaptureApp:
             check.state(["!disabled"])
         for check in self.logic_option_checkbuttons:
             check.state(["!disabled"])
+        self._sync_zhua_gui_rounds_entry_state()
 
     def _get_selected_logic_task_flags(self) -> dict[str, bool]:
         return {
@@ -2687,15 +2839,23 @@ class WindowCaptureApp:
             for key, _label, _default in self.logic_task_specs
         }
 
-    def _get_selected_logic_option_flags(self) -> dict[str, bool]:
-        flags = {
+    def _get_selected_logic_option_flags(self) -> dict[str, bool | int]:
+        flags: dict[str, bool | int] = {
             key: bool(self.logic_option_vars[key].get())
             for key, _label, _default in self.logic_option_specs
         }
+        flags["zhua_gui_rounds"] = 0
+        if not flags["zhua_gui_custom_rounds_enabled"]:
+            return flags
+
         try:
-            flags["zhua_gui_rounds"] = int(self.zhua_gui_rounds_var.get())
-        except (ValueError, TypeError):
-            flags["zhua_gui_rounds"] = 0
+            rounds = int(self.zhua_gui_rounds_var.get().strip())
+        except (ValueError, TypeError) as exc:
+            raise ValueError("自定义抓鬼轮数必须是正整数") from exc
+        if rounds <= 0:
+            raise ValueError("自定义抓鬼轮数必须大于 0")
+
+        flags["zhua_gui_rounds"] = rounds
         return flags
 
     def _run_script_action_task(
@@ -2743,7 +2903,6 @@ class WindowCaptureApp:
             return
 
         task_flags = self._get_selected_logic_task_flags()
-        task_options = self._get_selected_logic_option_flags()
         selected_labels = [
             label
             for key, label, _default in self.logic_task_specs
@@ -2753,12 +2912,28 @@ class WindowCaptureApp:
             self.status_var.set("请先勾选至少一个功能块")
             return
 
+        try:
+            task_options = self._get_selected_logic_option_flags()
+        except ValueError as exc:
+            self.status_var.set(str(exc))
+            return
+
         self._clear_log()
+        resolution_ok, resolution_changed = self._ensure_script_window_resolution(hwnd)
+        if not resolution_ok:
+            width, height = SCRIPT_CLIENT_SIZE
+            self.status_var.set(f"目标窗口未能调整为 {width}x{height}，已取消执行脚本")
+            return
+
         self.script_stop_event = threading.Event()
         self._set_script_running_state(True)
         self._append_log(f"已启动脚本，当前勾选功能块: {' / '.join(selected_labels)}")
         selected_option_labels = [
-            label
+            (
+                f"{label}（{task_options['zhua_gui_rounds']} 轮）"
+                if key == "zhua_gui_custom_rounds_enabled"
+                else label
+            )
             for key, label, _default in self.logic_option_specs
             if task_options.get(key)
         ]
@@ -2774,6 +2949,15 @@ class WindowCaptureApp:
         def _worker():
             logic_module_path = "<尚未加载>"
             try:
+                if resolution_changed:
+                    _ui_call(
+                        self._append_log,
+                        f"等待 {SCRIPT_RESOLUTION_SETTLE_SEC:.0f}s，让目标窗口按新分辨率完成重绘...",
+                    )
+                    if self.script_stop_event.wait(SCRIPT_RESOLUTION_SETTLE_SEC):
+                        _ui_call(self._append_log, "脚本已终止。")
+                        return
+
                 module = importlib.import_module("game_logic")
                 module = importlib.reload(module)
                 logic_module_path = str(getattr(module, "__file__", "<未知路径>"))
@@ -2789,8 +2973,6 @@ class WindowCaptureApp:
                     task_options=task_options,
                 )
             except Exception:
-                import traceback
-
                 error_details = traceback.format_exc().rstrip()
                 selected_tasks = " / ".join(selected_labels)
                 _ui_call(

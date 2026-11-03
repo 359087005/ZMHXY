@@ -1,20 +1,16 @@
 """
 抓鬼任务脚本。
 
-模板图放在 templates/5抓鬼任务/ 下。
+模板图放在 templates/201ZhuaGui/ 下。
 
 依赖模板：
-- 201ZhuaGui/jm_zg2.png
-- 201ZhuaGui/jm_zg.png
 - 201ZhuaGui/jm_zgrw.png
 - 201ZhuaGui/jm_jxzg_qd.png（继续抓鬼弹窗的「确定」按钮，静态无倒计时）
+- 201ZhuaGui/quxiao.png（战斗中的取消按钮）
 
 素材（不参与匹配，仅留档便于重新裁模板）：
 - 201ZhuaGui/jm_jxzg_full.png  完整客户区截图（802x602，含 1px 边框）
 - 201ZhuaGui/jm_jxzg_263.png / jm_jxzg_84.png  两种倒计时状态的弹窗
-
-复用模板：
-- 201ZhuaGui/quxiao.png
 """
 
 from __future__ import annotations
@@ -22,20 +18,13 @@ from __future__ import annotations
 import time
 from typing import Callable, Iterable
 
-from tasks.shared_rects import CANCEL_BUTTON_RECT, HUODONG_SEARCH_RECT
+from tasks.shared_rects import CANCEL_BUTTON_RECT
 
 Logger = Callable[[str], None]
 MatchResult = tuple[int, int, float]
 
-OVER_20_OPTION_KEY = "zhua_gui_over_20"
 ROUNDS_OPTION_KEY = "zhua_gui_rounds"
 
-OPEN_HUODONG_HOTKEY = ("alt", "c")
-
-ZHUAGUI_HUODONG_TEMPLATES = (
-    "201ZhuaGui/jm_zg2.png",
-    "201ZhuaGui/jm_zg.png",
-)
 ZHUAGUI_TASK_TEMPLATE = "201ZhuaGui/jm_zgrw.png"
 # 弹窗上倒计时在「取消(263)」那一侧，「确定」按钮是完全静态的，
 # 所以只拿确定按钮当模板：实测倒计时 263/84 两种状态下分数都是 0.9999。
@@ -46,14 +35,13 @@ BATTLE_CANCEL_TEMPLATE = "201ZhuaGui/quxiao.png"
 ZHUAGUI_TASK_SEARCH_RECT = (562, 126, 770, 448)
 NEXT_ROUND_SEARCH_RECT = (398, 240, 548, 369)
 
-HUODONG_GOTO_OFFSET_X = 155
 TASK_CLICK_RANDOM_OFFSET = 5
 MAP_NAV_RANDOM_OFFSET = 0
 # 确定按钮中心，实测值。优先点匹配到的中心，这个坐标只在拿不到中心时兜底。
 NEXT_ROUND_CONFIRM_CLICK = (474, 340)
 START_ZHUAGUI_CLICK = (698, 160)
 
-OVER_20_NAV_STEPS = [
+ZHONGKUI_NAV_STEPS = [
     ((36, 38), "打开地图", 2.0),
     ((383, 335), "切到长安城", 2.0),
     ((106, 27), "点击小地图", 2.0),
@@ -61,13 +49,14 @@ OVER_20_NAV_STEPS = [
 ]
 
 MATCH_THRESHOLD = 0.85
+# 战斗动画会使取消按钮与静态模板存在差异；调试帧实测最低约 0.805。
+# 该阈值只用于右下角 CANCEL_BUTTON_RECT，避免放宽其他模板的匹配条件。
+BATTLE_CANCEL_THRESHOLD = 0.78
 # PW_RENDERFULLCONTENT 抓的是整个窗口，按客户区尺寸裁剪会整体偏移
 # （实测 dx=+8 dy=+31，正好是边框和标题栏厚度），坐标系全错，因此不能用。
 # PW_CLIENTONLY 的坐标系才和模板一致。
 NEXT_ROUND_FULL_CONTENT = False
 DEFAULT_WAIT_SEC = 3.0
-OPEN_HUODONG_WAIT_SEC = 2.0
-HUODONG_TELEPORT_WAIT_SEC = 20.0
 # 任务指引没有模板可匹配（只是边框+变化的文字），位置固定，用固定坐标点。
 # 固定点两次：第一次没生效时第二次会成功；第一次已生效时第二次被游戏判为无效，无副作用。
 GUIDE_CLICK_TIMES = 2
@@ -139,37 +128,13 @@ def _find_required_match(
     return match, template
 
 
-def _run_over_20_navigation(bot, check_stop, wait_or_stop, stop_event):
-    bot.log("已勾选超20抓鬼，先走长安城 -> 钟馗的地图导航。")
-    for (x, y), label, wait_sec in OVER_20_NAV_STEPS:
+def _navigate_to_zhongkui(bot, check_stop, wait_or_stop, stop_event):
+    bot.log("抓鬼统一从长安城钟馗处开始，执行地图导航。")
+    for (x, y), label, wait_sec in ZHONGKUI_NAV_STEPS:
         check_stop(stop_event)
         bot.log(f"{label}：点击 ({x},{y})。")
         bot.click(x, y, MAP_NAV_RANDOM_OFFSET)
         wait_or_stop(bot, stop_event, wait_sec)
-
-
-def _open_huodong_and_trigger_zhuagui(bot, check_stop, wait_or_stop, stop_event):
-    bot.log("准备输入 Alt+C 打开活动界面。")
-    bot.hotkey(*OPEN_HUODONG_HOTKEY)
-    wait_or_stop(bot, stop_event, OPEN_HUODONG_WAIT_SEC)
-
-    zhuagui_match, template = _find_required_match(
-        bot,
-        check_stop,
-        stop_event,
-        ZHUAGUI_HUODONG_TEMPLATES,
-        HUODONG_SEARCH_RECT,
-        label="抓鬼活动入口",
-    )
-    zhuagui_x, zhuagui_y, _score = zhuagui_match
-    target_x = zhuagui_x + HUODONG_GOTO_OFFSET_X
-    bot.log(
-        f"基于 {template} 中心=({zhuagui_x},{zhuagui_y})，"
-        f"右移 {HUODONG_GOTO_OFFSET_X}px 后点击 ({target_x},{zhuagui_y})。"
-    )
-    bot.click(target_x, zhuagui_y, 0)
-    bot.log("等待 20 秒，避免角色在长安城时不触发传送。")
-    wait_or_stop(bot, stop_event, HUODONG_TELEPORT_WAIT_SEC)
 
 
 def _accept_zhuagui_task(bot, check_stop, stop_event):
@@ -210,12 +175,14 @@ def _find_battle_cancel(bot, check_stop, stop_event):
     """判断是否仍在战斗：连抓多帧，任一命中即算命中。
 
     单帧判定会被 PrintWindow 的偶发中间态帧带偏，导致战斗中被误判为已脱战。
+    战斗动画会使取消按钮与静态模板存在差异；调试帧实测分数约为 0.805，
+    因此仅在右下角局部区域内使用 0.78，其他抓鬼模板仍保持 0.85。
     """
     for attempt in range(1, BATTLE_CANCEL_RETRY + 1):
         check_stop(stop_event)
         match = bot.find_image(
             BATTLE_CANCEL_TEMPLATE,
-            threshold=MATCH_THRESHOLD,
+            threshold=BATTLE_CANCEL_THRESHOLD,
             search_rect=CANCEL_BUTTON_RECT,
             log_miss=False,
         )
@@ -317,7 +284,8 @@ def _debug_dump_next_round_miss(bot, miss_count: int) -> None:
 
                 bot.log(
                     f"调试[jxzg]：{label} {path.name}({t_w}x{t_h}) "
-                    f"{full_text}{region_text} 阈值={MATCH_THRESHOLD}"
+                    f"{full_text}{region_text} "
+                    f"阈值={BATTLE_CANCEL_THRESHOLD if name == BATTLE_CANCEL_TEMPLATE else MATCH_THRESHOLD}"
                 )
 
             _save_png(f"debug_jxzg_{miss_count}_{label}_full.png", frame)
@@ -328,7 +296,14 @@ def _debug_dump_next_round_miss(bot, miss_count: int) -> None:
         bot.log(f"调试[jxzg]：保存现场信息失败: {exc!r}")
 
 
-def _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event) -> bool:
+def _wait_for_next_round(
+    bot,
+    check_stop,
+    wait_or_stop,
+    stop_event,
+    *,
+    continue_to_next_round: bool = True,
+) -> bool:
     miss_count = 0
     idle_since = time.monotonic()
 
@@ -351,8 +326,15 @@ def _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event) -> bool:
             label="继续抓鬼提示",
         )
         if next_round_match:
-            # 模板就是确定按钮本身，匹配中心即按钮中心，直接点它最准。
+            # 模板就是确定按钮本身，匹配中心即按钮中心。
             click_x, click_y, score = next_round_match
+            if not continue_to_next_round:
+                bot.log(
+                    f"识别到继续抓鬼提示 score={score:.4f}，本轮已完成；"
+                    "已达到自定义轮数，不点击确定按钮。"
+                )
+                return True
+
             bot.log(
                 f"识别到继续抓鬼提示 score={score:.4f}，"
                 f"点击确定按钮中心=({click_x},{click_y})。"
@@ -407,7 +389,15 @@ def run_continue(bot, check_stop, wait_or_stop, stop_event, *, task_options=None
             bot.log("当前未检测到战斗，直接进入轮询等待继续抓鬼提示。")
 
         # 先把当前这一轮等完，再接正常循环
-        if not _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event):
+        if not _wait_for_next_round(
+            bot,
+            check_stop,
+            wait_or_stop,
+            stop_event,
+            continue_to_next_round=(
+                max_rounds <= 0 or round_count + 1 < max_rounds
+            ),
+        ):
             return
         round_count += 1
         bot.log(f"已完成第 {round_count} 轮抓鬼。")
@@ -422,7 +412,15 @@ def run_continue(bot, check_stop, wait_or_stop, stop_event, *, task_options=None
 
             _click_task_guide(bot, check_stop, wait_or_stop, stop_event)
 
-            if not _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event):
+            if not _wait_for_next_round(
+                bot,
+                check_stop,
+                wait_or_stop,
+                stop_event,
+                continue_to_next_round=(
+                    max_rounds <= 0 or round_count + 1 < max_rounds
+                ),
+            ):
                 return
 
             round_count += 1
@@ -435,9 +433,8 @@ def run_continue(bot, check_stop, wait_or_stop, stop_event, *, task_options=None
 
 
 def run(bot, check_stop, wait_or_stop, stop_event, *, task_options=None, task_flags=None):
-    """抓鬼主流程。"""
+    """抓鬼主流程：统一导航至长安城钟馗处开始。"""
     del task_flags
-    over_20_enabled = bool(task_options and task_options.get(OVER_20_OPTION_KEY))
     max_rounds = int(task_options.get(ROUNDS_OPTION_KEY, 0)) if task_options else 0
     if max_rounds > 0:
         bot.log(f"开始执行抓鬼逻辑，目标轮数: {max_rounds}")
@@ -447,10 +444,7 @@ def run(bot, check_stop, wait_or_stop, stop_event, *, task_options=None, task_fl
     round_count = 0
 
     try:
-        if over_20_enabled:
-            _run_over_20_navigation(bot, check_stop, wait_or_stop, stop_event)
-        else:
-            _open_huodong_and_trigger_zhuagui(bot, check_stop, wait_or_stop, stop_event)
+        _navigate_to_zhongkui(bot, check_stop, wait_or_stop, stop_event)
 
         while True:
             check_stop(stop_event)
@@ -471,7 +465,15 @@ def run(bot, check_stop, wait_or_stop, stop_event, *, task_options=None, task_fl
 
             _click_task_guide(bot, check_stop, wait_or_stop, stop_event)
 
-            if not _wait_for_next_round(bot, check_stop, wait_or_stop, stop_event):
+            if not _wait_for_next_round(
+                bot,
+                check_stop,
+                wait_or_stop,
+                stop_event,
+                continue_to_next_round=(
+                    max_rounds <= 0 or round_count + 1 < max_rounds
+                ),
+            ):
                 return
 
             round_count += 1

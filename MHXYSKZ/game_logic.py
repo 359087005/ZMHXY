@@ -2,7 +2,8 @@
 游戏内逻辑脚本。
 
 主界面点击「执行脚本」后，会热重载并调用本文件的 run(hwnd, log)。
-本文件负责按勾选功能块分发任务；支持直接执行的任务会跳过任务界面调度。
+本文件负责按勾选功能块分发任务：勾选的功能块按顺序依次执行，合并功能块会展开为多个步骤；
+支持直接执行的步骤跳过任务界面调度，其余步骤交给活动界面调度。
 """
 
 from __future__ import annotations
@@ -14,12 +15,14 @@ from typing import Callable
 
 Logger = Callable[[str], None]
 TaskFlags = dict[str, bool]
-TaskOptions = dict[str, bool]
+TaskOptions = dict[str, bool | int]
 
 TASK_LABELS = {
     "shi_men": "师门任务",
-    "wa_bao_tu": "挖宝图",
+    "bao_tu": "宝图",
+    # 打宝图/挖宝图作为合并功能块的执行步骤，保留独立 ID。
     "da_bao_tu": "打宝图",
+    "wa_bao_tu": "挖宝图",
     "mi_jing_xiang_yao": "秘境降妖",
     "zhua_gui": "抓鬼任务",
     "ji_xu_zhua_gui": "继续抓鬼",
@@ -31,7 +34,7 @@ TASK_LABELS = {
 }
 
 OPTION_LABELS = {
-    "zhua_gui_over_20": "超20抓鬼",
+    "zhua_gui_custom_rounds_enabled": "自定义抓几轮鬼",
 }
 
 DIRECT_RUN_TASK_MODULES = {
@@ -41,6 +44,14 @@ DIRECT_RUN_TASK_MODULES = {
     "ji_xu_zhua_gui": "tasks.t203_jixuzhuagui",
     "fu_ben": "tasks.t202_fuben",
 }
+
+# 合并功能块按顺序展开的执行步骤；未列出的功能块只执行自身。
+TASK_STEPS = {
+    # 先打宝图拿到宝图，再挖宝图。
+    "bao_tu": ("da_bao_tu", "wa_bao_tu"),
+}
+
+ACTIVITY_PANEL_MODULE = "tasks.t000_renwujiemian"
 
 
 class ScriptStopped(Exception):
@@ -97,6 +108,42 @@ def _run_task_module(
     module.run(bot, _check_stop, _wait_or_stop, stop_event, **kwargs)
 
 
+# 执行单个步骤：支持直跑的任务直接进入模块，其余任务交给活动界面调度。
+def _run_task_step(
+    step_id: str,
+    bot,
+    stop_event,
+    *,
+    task_flags: TaskFlags,
+    task_options: TaskOptions,
+    single: bool,
+):
+    label = TASK_LABELS[step_id]
+    direct_module_name = DIRECT_RUN_TASK_MODULES.get(step_id)
+    if direct_module_name:
+        scope = "单独执行，" if single else ""
+        bot.log(f"{label} {scope}直接进入任务逻辑，跳过任务界面调度。")
+        module = importlib.reload(importlib.import_module(direct_module_name))
+        _run_task_module(
+            module,
+            bot,
+            stop_event,
+            task_flags=task_flags,
+            task_options=task_options,
+        )
+        return
+
+    bot.log(f"{label} 通过活动界面调度执行。")
+    module = importlib.reload(importlib.import_module(ACTIVITY_PANEL_MODULE))
+    _run_task_module(
+        module,
+        bot,
+        stop_event,
+        task_flags={step_id: True},
+        task_options=task_options,
+    )
+
+
 # 作为 GUI 的总入口，负责诊断、准备窗口并分发到具体任务模块。
 def run(
     hwnd: int,
@@ -134,34 +181,24 @@ def run(
         if option_labels:
             bot.log(f"本次附加选项: {' / '.join(option_labels)}")
 
-        if len(selected_ids) == 1:
-            direct_task_id = selected_ids[0]
-            direct_module_name = DIRECT_RUN_TASK_MODULES.get(direct_task_id)
-            if direct_module_name:
-                bot.log(
-                    f"{TASK_LABELS[direct_task_id]} 单独执行，"
-                    "直接进入任务逻辑，跳过任务界面调度。"
-                )
-                direct_module = importlib.import_module(direct_module_name)
-                direct_module = importlib.reload(direct_module)
-                _run_task_module(
-                    direct_module,
-                    bot,
-                    stop_event,
-                    task_flags=selected_flags,
-                    task_options=selected_options,
-                )
-                bot.log("本次脚本执行完成。")
-                return
+        steps = [
+            step_id
+            for task_id in selected_ids
+            for step_id in TASK_STEPS.get(task_id, (task_id,))
+        ]
+        if len(steps) > 1:
+            bot.log(f"本次执行顺序: {' -> '.join(TASK_LABELS[step] for step in steps)}")
 
-        # 其它勾选组合仍交给任务界面调度
-        import tasks.t000_renwujiemian as renwujiemian
-        importlib.reload(renwujiemian)
-        renwujiemian.run(
-            bot, _check_stop, _wait_or_stop, stop_event,
-            task_flags=selected_flags,
-            task_options=selected_options,
-        )
+        for step_id in steps:
+            _check_stop(stop_event)
+            _run_task_step(
+                step_id,
+                bot,
+                stop_event,
+                task_flags=selected_flags,
+                task_options=selected_options,
+                single=len(steps) == 1,
+            )
 
         bot.log("本次脚本执行完成。")
     except ScriptStopped:

@@ -6,16 +6,19 @@
 
 1. 等待到达 NPC 旁边，自动弹出对话框
 2. 在右侧固定区域点击"听听无妨"图标
-3. 等待约 20 分钟任务自动完成
+3. 轮询右下角战斗取消按钮：连续 30 秒检测不到，判定打宝图已结束
 
-模板图放在 templates/2宝图任务/ 下。
-坐标和模板名均为占位值，请根据实际游戏截图替换。
+模板图放在 templates/102BaoTuRenWu/ 下。
+"听听无妨"的搜索区域为占位值，请根据实际游戏截图替换。
 """
 
 from __future__ import annotations
 
 import random
+import time
 from typing import Callable
+
+from tasks.shared_rects import CANCEL_BUTTON_RECT
 
 Logger = Callable[[str], None]
 
@@ -31,13 +34,65 @@ RANDOM_OFFSET = 15
 PANEL_WAIT_TIMEOUT_SEC = 30.0
 POLL_INTERVAL_RANGE = (2.0, 4.0)
 AFTER_CLICK_WAIT_SEC = 2.0
-TASK_WAIT_RANGE = (1150.0, 1250.0)    # 约 20 分钟，随机 1150~1250 秒
+
+# 右下角战斗中的取消按钮（与 201ZhuaGui/quxiao.png 是同一张图）。
+BATTLE_CANCEL_TEMPLATE = "102BaoTuRenWu/quxiao.png"
+# 战斗动画会让取消按钮与静态模板有差异，真实战斗帧实测约 0.805，因此单独用 0.78。
+BATTLE_CANCEL_THRESHOLD = 0.78
+BATTLE_POLL_INTERVAL_SEC = 2.0
+# 右下角连续这么久检测不到取消按钮，判定打宝图已结束（接任务后跑图到第一场战斗不超过 30 秒）。
+BATTLE_END_IDLE_SEC = 30.0
+
+
+def _wait_for_dabaotu_finish(bot, check_stop, wait_or_stop, stop_event):
+    """轮询右下角取消按钮，连续 BATTLE_END_IDLE_SEC 秒检测不到即判定打宝图结束。
+
+    从点击"听听无妨"后开始计时，每次检测到取消按钮都会重新计时。
+    """
+    bot.log(
+        f"打宝图进行中：右下角连续 {BATTLE_END_IDLE_SEC:.0f} 秒检测不到取消按钮，"
+        "即判定打宝图结束。"
+    )
+    last_battle_at = time.monotonic()
+    seen_battle = False
+    in_battle = False
+
+    while True:
+        check_stop(stop_event)
+        match = bot.find_image(
+            BATTLE_CANCEL_TEMPLATE,
+            threshold=BATTLE_CANCEL_THRESHOLD,
+            search_rect=CANCEL_BUTTON_RECT,
+            log_miss=False,
+        )
+        now = time.monotonic()
+        if match:
+            if not in_battle:
+                bot.log("检测到右下角取消按钮，打宝图战斗中。")
+            in_battle = True
+            seen_battle = True
+            last_battle_at = now
+        else:
+            if in_battle:
+                bot.log(
+                    f"右下角未检测到取消按钮，开始计时 {BATTLE_END_IDLE_SEC:.0f} 秒。"
+                )
+            in_battle = False
+            idle_sec = now - last_battle_at
+            if idle_sec >= BATTLE_END_IDLE_SEC:
+                if seen_battle:
+                    bot.log(
+                        f"右下角连续 {idle_sec:.0f} 秒未检测到取消按钮，判定打宝图已结束。"
+                    )
+                else:
+                    bot.log(f"接任务后 {idle_sec:.0f} 秒内未检测到战斗，结束打宝图。")
+                return
+
+        wait_or_stop(bot, stop_event, BATTLE_POLL_INTERVAL_SEC)
 
 
 def run(bot, check_stop, wait_or_stop, stop_event):
     """打宝图主流程，renwujiemian.py 点击前往后调用。"""
-    import time
-
     bot.log("开始执行打宝图逻辑")
 
     # 1. 轮询等待"听听无妨"图标出现
@@ -67,9 +122,7 @@ def run(bot, check_stop, wait_or_stop, stop_event):
         bot.log("等待对话框超时，终止打宝图。")
         return
 
-    # 2. 等待任务自动完成（约 20 分钟）
-    task_wait = random.uniform(*TASK_WAIT_RANGE)
-    bot.log(f"打宝图进行中，等待 {task_wait:.0f}s（约 {task_wait / 60:.1f} 分钟）")
-    wait_or_stop(bot, stop_event, task_wait)
+    # 2. 等待打宝图结束：右下角连续 30 秒检测不到取消按钮
+    _wait_for_dabaotu_finish(bot, check_stop, wait_or_stop, stop_event)
 
     bot.log("打宝图任务完成。")
